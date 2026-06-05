@@ -7,7 +7,6 @@ import io
 
 app = FastAPI()
 
-# Esto permite que tu página web en Netlify hable con este servidor
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,18 +21,19 @@ async def generate_stencil(file: UploadFile = File(...)):
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # Convertir a escala de grises
+    # 1. Convertir a escala de grises
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # Limpiar el ruido de la piel o fondo de la foto
-    blurred = cv2.bilateralFilter(gray, 9, 75, 75)
+    # 2. Aplicar un desenfoque Gaussiano fuerte para ignorar texturas pequeñas y ruidos del fondo
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     
-    # Extraer las líneas nítidas (Estilo calco/stencil)
-    stencil = cv2.adaptiveThreshold(
-        blurred, 255, 
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, 11, 2
-    )
+    # 3. Algoritmo Canny: Detecta los bordes principales e ignora los cambios suaves de luz
+    # Esto creará líneas blancas sobre un fondo negro (muy similar a tu ejemplo de referencia)
+    edges = cv2.Canny(blurred, 30, 100)
+    
+    # 4. Invertir la imagen para que las líneas queden negras y el fondo blanco (estilo calco tradicional)
+    # Si prefieres que el fondo sea negro y las líneas blancas, borra la siguiente línea de código:
+    stencil = cv2.bitwise_not(edges)
     
     _, encoded_img = cv2.imencode('.png', stencil)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
