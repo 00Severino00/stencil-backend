@@ -21,19 +21,25 @@ async def generate_stencil(file: UploadFile = File(...)):
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # 1. Convertir a escala de grises
+    # 1. Pasar a gris y aplicar un filtro para suavizar imperfecciones de la piel
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    smooth = cv2.bilateralFilter(gray, 7, 50, 50)
     
-    # 2. Aplicar un desenfoque Gaussiano fuerte para ignorar texturas pequeñas y ruidos del fondo
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    # 2. CAPA DE SOMBRAS: Crear un efecto de sombreado suave (estilo carboncillo)
+    gray_inv = cv2.bitwise_not(smooth)
+    # Desenfoque profundo para capturar volúmenes de luz
+    blur_inv = cv2.GaussianBlur(gray_inv, (21, 21), 0)
+    # Mezclar para extraer sombras intermedias en escala de grises
+    shadows = cv2.divide(smooth, cv2.bitwise_not(blur_inv), scale=256)
     
-    # 3. Algoritmo Canny: Detecta los bordes principales e ignora los cambios suaves de luz
-    # Esto creará líneas blancas sobre un fondo negro (muy similar a tu ejemplo de referencia)
-    edges = cv2.Canny(blurred, 30, 100)
+    # 3. CAPA DE LÍNEAS: Detección nítida de bordes maestros
+    edges = cv2.Canny(smooth, 25, 85)
+    edges_inv = cv2.bitwise_not(edges)
     
-    # 4. Invertir la imagen para que las líneas queden negras y el fondo blanco (estilo calco tradicional)
-    # Si prefieres que el fondo sea negro y las líneas blancas, borra la siguiente línea de código:
-    stencil = cv2.bitwise_not(edges)
+    # 4. FUSIÓN INTELIGENTE: Multiplicar las líneas duras con las sombras suaves
+    # Esto te dará el contorno marcado de la Medusa con sus degradés internos
+    result = cv2.multiply(shadows, edges_inv, scale=1/255)
     
-    _, encoded_img = cv2.imencode('.png', stencil)
+    # Convertir a imagen PNG final
+    _, encoded_img = cv2.imencode('.png', result)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
