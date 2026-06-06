@@ -16,27 +16,25 @@ app.add_middleware(
 )
 
 @app.post("/generate-stencil/")
-async def generate_stencil(file: UploadFile = File(...), tolerance: int = Form(10)):
+async def generate_stencil(file: UploadFile = File(...), tolerance: int = Form(100)):
     contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # 1. Pasar a escala de grises
+    # 1. Pasar a gris y aplicar un filtro para suavizar imperfecciones de fondo
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
     
-    # 2. Suavizado bilateral para mantener los bordes duros pero eliminar texturas de piel/ruido
-    smoothed = cv2.bilateralFilter(gray, 9, 75, 75)
+    # 2. Algoritmo Canny Puro para Line Art Estricto
+    # La tolerancia define el umbral de detección de bordes
+    # A menor tolerancia, entran más líneas. A mayor tolerancia, solo las líneas más fuertes.
+    low_threshold = max(1, 150 - (tolerance * 7))
+    high_threshold = max(50, 255 - (tolerance * 5))
     
-    # 3. Mapear el Line Art Real mediante una estructura de Umbral Adaptativo dinámico.
-    # Usamos la tolerancia que viene desde la interfaz web.
-    # El tamaño del bloque determina el grosor y el valor de tolerancia filtra las líneas falsas.
-    block_size = 11
-    constant_val = tolerance # Este valor viene del slider de la web (típicamente entre 1 y 20)
+    edges = cv2.Canny(blurred, low_threshold, high_threshold)
     
-    line_art = cv2.adaptiveThreshold(
-        smoothed, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, block_size, constant_val
-    )
+    # 3. Invertir la imagen para que las líneas queden negras y el fondo blanco puro
+    line_art = cv2.bitwise_not(edges)
 
     _, encoded_img = cv2.imencode('.png', line_art)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
@@ -47,15 +45,12 @@ async def render_hd(file: UploadFile = File(...)):
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
 
-    # Escalado avanzado para vectorizar y limpiar los bordes del Line Art
+    # Escalado de alta calidad para vectorizar las líneas extraídas
     alto, ancho = img.shape[:2]
     img_hd = cv2.resize(img, (ancho * 2, alto * 2), interpolation=cv2.INTER_CUBIC)
     
-    # Filtro de limpieza para trazos continuos
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    img_hd = cv2.morphologyEx(img_hd, cv2.MORPH_CLOSE, kernel)
-    
-    _, final_hd = cv2.threshold(img_hd, 127, 255, cv2.THRESH_BINARY)
+    # Limpieza de píxeles sueltos para trazos continuos
+    _, final_hd = cv2.threshold(img_hd, 200, 255, cv2.THRESH_BINARY)
 
     _, encoded_img = cv2.imencode('.png', final_hd)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
