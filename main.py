@@ -21,36 +21,41 @@ async def generate_stencil(file: UploadFile = File(...), tolerance: int = Form(1
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # 1. Pasar a escala de grises
+    # 1. Control estricto de resolución para no romper la memoria RAM de Render
+    alto, ancho = img.shape[:2]
+    max_dim = 1000
+    if max(alto, ancho) > max_dim:
+        escala = max_dim / max(alto, ancho)
+        img = cv2.resize(img, (int(ancho * esca), int(alto * escala)), interpolation=cv2.INTER_AREA)
+        alto, ancho = img.shape[:2]
+
+    # 2. Convertir a escala de grises y validar fondo
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
-    # 2. Detección de fondo para evitar plastas negras
-    muestra_fondo = gray[0:20, 0:20]
-    if np.mean(muestra_fondo) < 127:
+    if np.mean(gray[0:20, 0:20]) < 127:
         gray = cv2.bitwise_not(gray)
 
-    # 3. Super-Sampling controlado (Escalado x2 de alta fidelidad)
-    # Creamos píxeles intermedios virtuales para calcular curvas suaves
-    alto, ancho = gray.shape[:2]
-    img_alta = cv2.resize(gray, (ancho * 2, alto * 2), interpolation=cv2.INTER_CUBIC)
+    # 3. FILTRO DE LÍNEA PURA (Diferencia de Gaussianas)
+    # En lugar de umbrales, restamos dos niveles de desenfoque. 
+    # Esto elimina manchas de iluminación y deja SOLO las líneas del dibujo vivas.
+    g1 = cv2.GaussianBlur(gray, (3, 3), 0)
+    g2 = cv2.GaussianBlur(gray, (25, 25), 0)
+    dog = cv2.divide(g1, g2, scale=255)
 
-    # 4. Limpieza del ruido e imperfecciones de capturas
-    filtrada = cv2.bilateralFilter(img_alta, 5, 50, 50)
+    # 4. Ajuste del grosor del estilógrafo mediante el slider
+    # Mapeo óptimo para el control del trazo
+    valor_tinta = max(200, min(250, 255 - int(tolerance)))
+    _, binary = cv2.threshold(dog, valor_tinta, 255, cv2.THRESH_BINARY)
 
-    # 5. EL SECRETO DEL ESTILÓGRAFO: Campo de distancia suavizado (Anti-aliasing de Procreate)
-    # En lugar de cortar el píxel bruscamente, usamos un umbral blando con curvas de Gauss
-    # El slider controla el grosor exacto del estilógrafo (tinta más densa o fina)
-    valor_umbral = max(40, min(240, 255 - (int(tolerance) * 3)))
+    # 5. SUPER-SMOOTHING (Efecto StreamLine de Procreate)
+    # Duplicamos la escala virtualmente para redondear las esquinas pixeladas
+    hd = cv2.resize(binary, (ancho * 2, alto * 2), interpolation=cv2.INTER_CUBIC)
+    hd_blur = cv2.GaussianBlur(hd, (3, 3), 0)
+    _, hd_thresh = cv2.threshold(hd_blur, 220, 255, cv2.THRESH_BINARY)
     
-    # Creamos una máscara de suavizado sub-píxel
-    _, mascara_binaria = cv2.threshold(filtrada, valor_umbral, 255, cv2.THRESH_BINARY)
-    
-    # Aplicamos un desenfoque sutil y reducimos de tamaño con interpolación de área 
-    # Esto fusiona los "dientes de sierra" en curvas continuas, líquidas y perfectas
-    lineas_suaves = cv2.GaussianBlur(mascara_binaria, (3, 3), 0)
-    resultado_final = cv2.resize(lineas_suaves, (ancho, alto), interpolation=cv2.INTER_AREA)
+    # Regresamos al tamaño final aplicando un antialiasing nativo super suave
+    resultado = cv2.resize(hd_thresh, (ancho, alto), interpolation=cv2.INTER_AREA)
 
-    _, encoded_img = cv2.imencode('.png', resultado_final)
+    _, encoded_img = cv2.imencode('.png', resultado)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
 
 @app.post("/render-hd/")
@@ -59,14 +64,9 @@ async def render_hd(file: UploadFile = File(...)):
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
 
-    # El botón HD refina aún más las curvas simulando un trazo vectorial pulido
-    alto, ancho = img.shape[:2]
-    hd_upscale = cv2.resize(img, (ancho * 2, alto * 2), interpolation=cv2.INTER_CUBIC)
-    
-    hd_blur = cv2.GaussianBlur(hd_upscale, (3, 3), 0)
-    _, hd_final = cv2.threshold(hd_blur, 210, 255, cv2.THRESH_BINARY)
-    
-    resultado_hd = cv2.resize(hd_final, (ancho, alto), interpolation=cv2.INTER_AREA)
+    # El modo HD intensifica el negro del trazo y lima cualquier imperfección restante
+    blur = cv2.GaussianBlur(img, (3, 3), 0)
+    _, final_hd = cv2.threshold(blur, 230, 255, cv2.THRESH_BINARY)
 
-    _, encoded_img = cv2.imencode('.png', resultado_hd)
+    _, encoded_img = cv2.imencode('.png', final_hd)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
