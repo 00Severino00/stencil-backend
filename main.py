@@ -21,48 +21,48 @@ async def generate_stencil(file: UploadFile = File(...), tolerance: int = Form(1
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # 1. Redimensión ligera obligatoria para proteger la RAM de Render
+    # 1. Normalización estricta de tamaño para proteger la RAM de Render
     alto, ancho = img.shape[:2]
-    max_dim = 800
+    max_dim = 1000
     if max(alto, ancho) > max_dim:
         escala = max_dim / max(alto, ancho)
         img = cv2.resize(img, (int(ancho * escala), int(alto * escala)), interpolation=cv2.INTER_AREA)
 
-    # 2. Convertir a grises y suavizar para remover el ruido digital
+    # 2. Escala de grises y eliminación de ruido base
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    blur_previo = cv2.GaussianBlur(gray, (3, 3), 0)
 
-    # 3. FILTRO DE ESTILÓGRAFO (Scharr Gradient)
-    # Detecta los bordes verdaderos de la imagen (siluetas de ojos, pelo, etc.) e ignora las sombras masivas
-    grad_x = cv2.Scharr(blur, cv2.CV_16S, 1, 0)
-    grad_y = cv2.Scharr(blur, cv2.CV_16S, 0, 1)
-    
-    abs_grad_x = cv2.convertScaleAbs(grad_x)
-    abs_grad_y = cv2.convertScaleAbs(grad_y)
-    
-    # Combinamos ambos ejes para tener el mapa de líneas completo
-    contornos = cv2.addWeighted(abs_grad_x, 0.5, abs_grad_y, 0.5, 0)
+    # 3. EL SECRETO DEL ESTILÓGRAFO: Umbral Adaptativo de Gauss
+    # En lugar de recortar a lo bruto, analiza el entorno de cada píxel.
+    # El slider de tolerancia define el tamaño del bloque (grosor de la pluma)
+    block_size = int(tolerance)
+    if block_size % 2 == 0:
+        block_size += 1
+    block_size = max(3, min(49, block_size)) # Mantener el rango seguro
 
-    # 4. Invertir y aplicar el Grosor del Pincel usando el slider
-    # El slider controla el contraste del trazo
-    grosor_ajuste = max(5, min(250, int(tolerance) * 6))
-    _, thresh = cv2.threshold(contornos, grosor_ajuste, 255, cv2.THRESH_BINARY_INV)
+    # Genera las líneas ultra-limpias de Procreate
+    stencil = cv2.adaptiveThreshold(
+        blur_previo, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        cv2.THRESH_BINARY, block_size, 4
+    )
 
-    # 5. Limpieza final anti-aliasing ligera sin consumo de memoria
-    resultado = cv2.medianBlur(thresh, 3)
+    # 4. Suavizado de bordes sub-píxel integrado (No consume RAM)
+    # Suaviza los dientes de sierra sin destruir los detalles del trazo artístico
+    resultado = cv2.medianBlur(stencil, 3)
 
     _, encoded_img = cv2.imencode('.png', resultado)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
 
 @app.post("/render-hd/")
 async def render_hd(file: UploadFile = File(...)):
+    # Renderizado HD optimizado en memoria
     contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
 
-    # Refinado rápido: adelgaza imperfecciones remanentes
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    resultado_hd = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
+    # Filtro Bilateral para romper el pixelado remanente y definir las curvas
+    limpio = cv2.bilateralFilter(img, 4, 75, 75)
+    _, final_hd = cv2.threshold(limpio, 200, 255, cv2.THRESH_BINARY)
 
-    _, encoded_img = cv2.imencode('.png', resultado_hd)
+    _, encoded_img = cv2.imencode('.png', final_hd)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
