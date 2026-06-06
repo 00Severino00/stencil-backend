@@ -16,27 +16,33 @@ app.add_middleware(
 )
 
 @app.post("/generate-stencil/")
-async def generate_stencil(file: UploadFile = File(...), tolerance: int = Form(100)):
+async def generate_stencil(file: UploadFile = File(...), tolerance: int = Form(10)):
     contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # 1. Pasar a gris y aplicar un filtro para suavizar imperfecciones de fondo
+    # 1. Pasar a escala de grises de alta precisión
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
     
-    # 2. Algoritmo Canny Puro para Line Art Estricto
-    # La tolerancia define el umbral de detección de bordes
-    # A menor tolerancia, entran más líneas. A mayor tolerancia, solo las líneas más fuertes.
-    low_threshold = max(1, 150 - (tolerance * 7))
-    high_threshold = max(50, 255 - (tolerance * 5))
+    # 2. Duplicar el tamaño con interpolación cúbica para crear píxeles intermedios suavizados
+    alto, ancho = gray.shape[:2]
+    gray_scaled = cv2.resize(gray, (ancho * 2, alto * 2), interpolation=cv2.INTER_CUBIC)
     
-    edges = cv2.Canny(blurred, low_threshold, high_threshold)
+    # 3. Extraer bordes usando gradiente morfológico (genera el contorno del estilógrafo)
+    # Ajustamos el tamaño del pincel según el slider de tolerancia de forma sutil
+    grosor_pincel = 3 if tolerance < 10 else 5
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grosor_pincel, grosor_pincel))
+    gradiente = cv2.morphologyEx(gray_scaled, cv2.MORPH_GRADIENT, kernel)
     
-    # 3. Invertir la imagen para que las líneas queden negras y el fondo blanco puro
-    line_art = cv2.bitwise_not(edges)
+    # 4. Invertir y aplicar umbral con desenfoque sub-píxel para simular la tinta del estilógrafo
+    # Mapeamos la tolerancia para ajustar qué tan "fuerte" o sensible es la presión del trazo
+    umbral_dinamico = max(5, int(tolerance * 4))
+    _, fondo_blanco = cv2.threshold(gradiente, umbral_dinamico, 255, cv2.THRESH_BINARY_INV)
+    
+    # 5. El toque de Procreate: Un suavizado gaussiano leve que elimina los dientes de sierra
+    line_art_pulido = cv2.GaussianBlur(fondo_blanco, (3, 3), 0)
 
-    _, encoded_img = cv2.imencode('.png', line_art)
+    _, encoded_img = cv2.imencode('.png', line_art_pulido)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
 
 @app.post("/render-hd/")
@@ -45,12 +51,9 @@ async def render_hd(file: UploadFile = File(...)):
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
 
-    # Escalado de alta calidad para vectorizar las líneas extraídas
-    alto, ancho = img.shape[:2]
-    img_hd = cv2.resize(img, (ancho * 2, alto * 2), interpolation=cv2.INTER_CUBIC)
-    
-    # Limpieza de píxeles sueltos para trazos continuos
-    _, final_hd = cv2.threshold(img_hd, 200, 255, cv2.THRESH_BINARY)
+    # El Render HD refina y consolida el suavizado del estilógrafo
+    blurred = cv2.GaussianBlur(img, (3, 3), 0)
+    _, final_hd = cv2.threshold(blurred, 220, 255, cv2.THRESH_BINARY)
 
     _, encoded_img = cv2.imencode('.png', final_hd)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
