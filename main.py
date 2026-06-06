@@ -21,40 +21,38 @@ async def generate_stencil(file: UploadFile = File(...), tolerance: int = Form(1
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # 1. Escala inteligente: Redimensionar solo si la imagen es masiva para proteger la RAM de Render
+    # Redimensión de seguridad para control estricto de memoria en Render
     alto, ancho = img.shape[:2]
-    max_dim = 1200
+    max_dim = 1000
     if max(alto, ancho) > max_dim:
         escala = max_dim / max(alto, ancho)
         img = cv2.resize(img, (int(ancho * escala), int(alto * escala)), interpolation=cv2.INTER_AREA)
 
-    # 2. Convertir a escala de grises
+    # 1. Pasar a escala de grises y suavizar texturas de fondo
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
-    # 3. DETECCIÓN AUTOMÁTICA DE FONDO (Inteligencia anti-plastas)
-    # Calculamos la esquina superior izquierda para saber si predomina el negro o el blanco
-    muestra_fondo = gray[0:20, 0:20]
-    es_fondo_oscuro = np.mean(muestra_fondo) < 127
-    
+    gray_blur = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    # 2. Detección autónoma del tipo de imagen (Fondo Oscuro vs Fondo Claro)
+    muestra_fondo = gray_blur[0:15, 0:15]
+    es_fondo_oscuro = np.mean(muestra_fondo) < 110
+
     if es_fondo_oscuro:
-        # Si la imagen es estilo Medusa (Fondo negro, líneas claras), la invertimos para trabajar en limpio
-        gray = cv2.bitwise_not(gray)
+        # Modo Invertido (Para imágenes tipo Medusa con líneas claras)
+        gray_blur = cv2.bitwise_not(gray_blur)
 
-    # 4. Umbralizado Adaptativo Gaussiano (Vuelve a la precisión que te gustó)
-    # Ajustamos dinámicamente el tamaño del bloque según el slider de la interfaz
-    block_size = max(3, int(tolerance) * 2 + 1)
-    if block_size % 2 == 0:
-        block_size += 1
+    # 3. Umbralizado de Otsu + Ajuste manual fino (Evita el granulado sucio)
+    # Calculamos el umbral óptimo del contraste automáticamente
+    umbral_optimo, _ = cv2.threshold(gray_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Modificamos el umbral usando la tolerancia del slider para limpiar imperfecciones
+    ajuste_umbral = umbral_optimo + (tolerance - 15) * 1.5
+    ajuste_umbral = max(10, min(245, ajuste_umbral))
 
-    thresh = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, block_size, 9
-    )
+    _, thresh = cv2.threshold(gray_blur, ajuste_umbral, 255, cv2.THRESH_BINARY)
 
-    # 5. Estilógrafo y Limpieza de bordes pixelados
-    # Aplicamos un desenfoque sutil y re-umbralizamos para fusionar píxeles rotos en curvas fluidas
-    suave = cv2.GaussianBlur(thresh, (3, 3), 0)
-    _, resultado = cv2.threshold(suave, 180, 255, cv2.THRESH_BINARY)
+    # 4. Suavizado morfológico final para compactar las líneas rotas
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    resultado = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
     _, encoded_img = cv2.imencode('.png', resultado)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
@@ -65,9 +63,12 @@ async def render_hd(file: UploadFile = File(...)):
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
 
-    # Render HD libre de caídas de RAM: Suaviza imperfecciones del trazo sin inflar la imagen
-    blur = cv2.GaussianBlur(img, (3, 3), 0)
-    _, final_hd = cv2.threshold(blur, 200, 255, cv2.THRESH_BINARY)
+    # Refinado estricto: Elimina los bordes pixelados mediante interpolación bilineal
+    alto, ancho = img.shape[:2]
+    img_hd = cv2.resize(img, (ancho * 2, alto * 2), interpolation=cv2.INTER_LINEAR)
+    
+    blur = cv2.GaussianBlur(img_hd, (3, 3), 0)
+    _, final_hd = cv2.threshold(blur, 220, 255, cv2.THRESH_BINARY)
 
     _, encoded_img = cv2.imencode('.png', final_hd)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
