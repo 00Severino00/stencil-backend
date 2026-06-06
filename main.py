@@ -21,39 +21,35 @@ async def generate_stencil(file: UploadFile = File(...), tolerance: int = Form(1
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # 1. Control estricto de resolución para no romper la memoria RAM de Render
+    # 1. Redimensión ligera obligatoria para proteger la RAM de Render
     alto, ancho = img.shape[:2]
-    max_dim = 1000
+    max_dim = 800
     if max(alto, ancho) > max_dim:
         escala = max_dim / max(alto, ancho)
-        img = cv2.resize(img, (int(ancho * esca), int(alto * escala)), interpolation=cv2.INTER_AREA)
-        alto, ancho = img.shape[:2]
+        img = cv2.resize(img, (int(ancho * escala), int(alto * escala)), interpolation=cv2.INTER_AREA)
 
-    # 2. Convertir a escala de grises y validar fondo
+    # 2. Convertir a grises y suavizar para remover el ruido digital
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    if np.mean(gray[0:20, 0:20]) < 127:
-        gray = cv2.bitwise_not(gray)
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
 
-    # 3. FILTRO DE LÍNEA PURA (Diferencia de Gaussianas)
-    # En lugar de umbrales, restamos dos niveles de desenfoque. 
-    # Esto elimina manchas de iluminación y deja SOLO las líneas del dibujo vivas.
-    g1 = cv2.GaussianBlur(gray, (3, 3), 0)
-    g2 = cv2.GaussianBlur(gray, (25, 25), 0)
-    dog = cv2.divide(g1, g2, scale=255)
-
-    # 4. Ajuste del grosor del estilógrafo mediante el slider
-    # Mapeo óptimo para el control del trazo
-    valor_tinta = max(200, min(250, 255 - int(tolerance)))
-    _, binary = cv2.threshold(dog, valor_tinta, 255, cv2.THRESH_BINARY)
-
-    # 5. SUPER-SMOOTHING (Efecto StreamLine de Procreate)
-    # Duplicamos la escala virtualmente para redondear las esquinas pixeladas
-    hd = cv2.resize(binary, (ancho * 2, alto * 2), interpolation=cv2.INTER_CUBIC)
-    hd_blur = cv2.GaussianBlur(hd, (3, 3), 0)
-    _, hd_thresh = cv2.threshold(hd_blur, 220, 255, cv2.THRESH_BINARY)
+    # 3. FILTRO DE ESTILÓGRAFO (Scharr Gradient)
+    # Detecta los bordes verdaderos de la imagen (siluetas de ojos, pelo, etc.) e ignora las sombras masivas
+    grad_x = cv2.Scharr(blur, cv2.CV_16S, 1, 0)
+    grad_y = cv2.Scharr(blur, cv2.CV_16S, 0, 1)
     
-    # Regresamos al tamaño final aplicando un antialiasing nativo super suave
-    resultado = cv2.resize(hd_thresh, (ancho, alto), interpolation=cv2.INTER_AREA)
+    abs_grad_x = cv2.convertScaleAbs(grad_x)
+    abs_grad_y = cv2.convertScaleAbs(grad_y)
+    
+    # Combinamos ambos ejes para tener el mapa de líneas completo
+    contornos = cv2.addWeighted(abs_grad_x, 0.5, abs_grad_y, 0.5, 0)
+
+    # 4. Invertir y aplicar el Grosor del Pincel usando el slider
+    # El slider controla el contraste del trazo
+    grosor_ajuste = max(5, min(250, int(tolerance) * 6))
+    _, thresh = cv2.threshold(contornos, grosor_ajuste, 255, cv2.THRESH_BINARY_INV)
+
+    # 5. Limpieza final anti-aliasing ligera sin consumo de memoria
+    resultado = cv2.medianBlur(thresh, 3)
 
     _, encoded_img = cv2.imencode('.png', resultado)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
@@ -64,9 +60,9 @@ async def render_hd(file: UploadFile = File(...)):
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
 
-    # El modo HD intensifica el negro del trazo y lima cualquier imperfección restante
-    blur = cv2.GaussianBlur(img, (3, 3), 0)
-    _, final_hd = cv2.threshold(blur, 230, 255, cv2.THRESH_BINARY)
+    # Refinado rápido: adelgaza imperfecciones remanentes
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    resultado_hd = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
 
-    _, encoded_img = cv2.imencode('.png', final_hd)
+    _, encoded_img = cv2.imencode('.png', resultado_hd)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
