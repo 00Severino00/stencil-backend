@@ -21,40 +21,36 @@ async def generate_stencil(file: UploadFile = File(...), tolerance: int = Form(1
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # Redimensión de seguridad para control estricto de memoria en Render
-    alto, ancho = img.shape[:2]
-    max_dim = 1000
-    if max(alto, ancho) > max_dim:
-        escala = max_dim / max(alto, ancho)
-        img = cv2.resize(img, (int(ancho * escala), int(alto * escala)), interpolation=cv2.INTER_AREA)
-
-    # 1. Pasar a escala de grises y suavizar texturas de fondo
+    # 1. Pasar a escala de grises
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray_blur = cv2.GaussianBlur(gray, (3, 3), 0)
-
-    # 2. Detección autónoma del tipo de imagen (Fondo Oscuro vs Fondo Claro)
-    muestra_fondo = gray_blur[0:15, 0:15]
-    es_fondo_oscuro = np.mean(muestra_fondo) < 110
-
-    if es_fondo_oscuro:
-        # Modo Invertido (Para imágenes tipo Medusa con líneas claras)
-        gray_blur = cv2.bitwise_not(gray_blur)
-
-    # 3. Umbralizado de Otsu + Ajuste manual fino (Evita el granulado sucio)
-    # Calculamos el umbral óptimo del contraste automáticamente
-    umbral_optimo, _ = cv2.threshold(gray_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    # Modificamos el umbral usando la tolerancia del slider para limpiar imperfecciones
-    ajuste_umbral = umbral_optimo + (tolerance - 15) * 1.5
-    ajuste_umbral = max(10, min(245, ajuste_umbral))
+    # 2. Detección de fondo para evitar plastas negras
+    muestra_fondo = gray[0:20, 0:20]
+    if np.mean(muestra_fondo) < 127:
+        gray = cv2.bitwise_not(gray)
 
-    _, thresh = cv2.threshold(gray_blur, ajuste_umbral, 255, cv2.THRESH_BINARY)
+    # 3. Super-Sampling controlado (Escalado x2 de alta fidelidad)
+    # Creamos píxeles intermedios virtuales para calcular curvas suaves
+    alto, ancho = gray.shape[:2]
+    img_alta = cv2.resize(gray, (ancho * 2, alto * 2), interpolation=cv2.INTER_CUBIC)
 
-    # 4. Suavizado morfológico final para compactar las líneas rotas
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    resultado = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    # 4. Limpieza del ruido e imperfecciones de capturas
+    filtrada = cv2.bilateralFilter(img_alta, 5, 50, 50)
 
-    _, encoded_img = cv2.imencode('.png', resultado)
+    # 5. EL SECRETO DEL ESTILÓGRAFO: Campo de distancia suavizado (Anti-aliasing de Procreate)
+    # En lugar de cortar el píxel bruscamente, usamos un umbral blando con curvas de Gauss
+    # El slider controla el grosor exacto del estilógrafo (tinta más densa o fina)
+    valor_umbral = max(40, min(240, 255 - (int(tolerance) * 3)))
+    
+    # Creamos una máscara de suavizado sub-píxel
+    _, mascara_binaria = cv2.threshold(filtrada, valor_umbral, 255, cv2.THRESH_BINARY)
+    
+    # Aplicamos un desenfoque sutil y reducimos de tamaño con interpolación de área 
+    # Esto fusiona los "dientes de sierra" en curvas continuas, líquidas y perfectas
+    lineas_suaves = cv2.GaussianBlur(mascara_binaria, (3, 3), 0)
+    resultado_final = cv2.resize(lineas_suaves, (ancho, alto), interpolation=cv2.INTER_AREA)
+
+    _, encoded_img = cv2.imencode('.png', resultado_final)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
 
 @app.post("/render-hd/")
@@ -63,12 +59,14 @@ async def render_hd(file: UploadFile = File(...)):
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
 
-    # Refinado estricto: Elimina los bordes pixelados mediante interpolación bilineal
+    # El botón HD refina aún más las curvas simulando un trazo vectorial pulido
     alto, ancho = img.shape[:2]
-    img_hd = cv2.resize(img, (ancho * 2, alto * 2), interpolation=cv2.INTER_LINEAR)
+    hd_upscale = cv2.resize(img, (ancho * 2, alto * 2), interpolation=cv2.INTER_CUBIC)
     
-    blur = cv2.GaussianBlur(img_hd, (3, 3), 0)
-    _, final_hd = cv2.threshold(blur, 220, 255, cv2.THRESH_BINARY)
+    hd_blur = cv2.GaussianBlur(hd_upscale, (3, 3), 0)
+    _, hd_final = cv2.threshold(hd_blur, 210, 255, cv2.THRESH_BINARY)
+    
+    resultado_hd = cv2.resize(hd_final, (ancho, alto), interpolation=cv2.INTER_AREA)
 
-    _, encoded_img = cv2.imencode('.png', final_hd)
+    _, encoded_img = cv2.imencode('.png', resultado_hd)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
