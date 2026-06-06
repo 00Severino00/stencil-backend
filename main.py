@@ -16,47 +16,39 @@ app.add_middleware(
 )
 
 @app.post("/generate-stencil/")
-async def generate_stencil(file: UploadFile = File(...), tolerance: int = Form(15)):
+async def generate_stencil(file: UploadFile = File(...), tolerance: int = Form(25)):
     contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # 1. Limitar resolución para salvar la RAM de Render
+    # 1. Control estricto de resolución (Cero caídas de RAM)
     alto, ancho = img.shape[:2]
-    max_dim = 1024
+    max_dim = 1000
     if max(alto, ancho) > max_dim:
         escala = max_dim / max(alto, ancho)
         img = cv2.resize(img, (int(ancho * escala), int(alto * escala)), interpolation=cv2.INTER_AREA)
 
-    # 2. Convertir a escala de grises y suavizado bilateral (mantiene bordes vivos, destruye ruido)
+    # 2. Conversión a escala de grises y eliminación de ruido de compresión
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    bi = cv2.bilateralFilter(gray, 7, 50, 50)
+    
+    # 3. Suavizado bilateral para conservar bordes artísticos vivos e ignorar texturas suaves
+    smoothed = cv2.bilateralFilter(gray, 9, 75, 75)
 
-    # 3. FILTRO CLAHE: Ecualización de contraste local para borrar artefactos de compresión y capturas
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    gray_equalizada = clahe.apply(bi)
+    # 4. Detector de Bordes Canny con umbral dinámico basado en el Slider
+    # Mapeamos la tolerancia para ajustar la sensibilidad del trazo técnico
+    thresh_high = max(50, min(250, int(tolerance * 5)))
+    thresh_low = int(thresh_high / 2)
+    
+    edges = cv2.Canny(smoothed, thresh_low, thresh_high)
 
-    # 4. Cálculo dinámico del grosor y sensibilidad de línea
-    # Mapeamos la tolerancia del slider (5 a 45) a los parámetros de binarización
-    param_c = int((tolerance - 25) / 2)
+    # 5. Invertir para obtener líneas negras sobre fondo blanco (Estilo Calco Tradicional)
+    stencil = cv2.bitwise_not(edges)
 
-    # Generamos la base del calco usando un bloque dinámico
-    block_size = int(tolerance)
-    if block_size % 2 == 0:
-        block_size += 1
-    block_size = max(5, min(49, block_size))
-
-    # Umbral adaptativo corregido con factor de descarte C para eliminar sombreados indeseados
-    stencil = cv2.adaptiveThreshold(
-        gray_equalizada, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, block_size, param_c + 5
-    )
-
-    # 5. Operación morfológica de limpieza para remover puntos negros aislados (ruido)
+    # 6. Limpieza morfológica para conectar líneas finas rotas y eliminar imperfecciones
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    cleaned = cv2.morphologyEx(stencil, cv2.MORPH_OPEN, kernel)
+    resultado = cv2.morphologyEx(stencil, cv2.MORPH_CLOSE, kernel)
 
-    _, encoded_img = cv2.imencode('.png', cleaned)
+    _, encoded_img = cv2.imencode('.png', resultado)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
 
 @app.post("/render-hd/")
@@ -65,13 +57,13 @@ async def render_hd(file: UploadFile = File(...)):
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
 
-    # Desvanecer los serruchos y pixelados usando desenfoque medio y umbralizado directo
+    # Suavizado sub-píxel para remover el diente de sierra
     blur = cv2.medianBlur(img, 3)
-    _, hd_final = cv2.threshold(blur, 180, 255, cv2.THRESH_BINARY)
+    _, hd_final = cv2.threshold(blur, 200, 255, cv2.THRESH_BINARY)
 
-    # Suavizado de contorno final (antialiasing analógico)
-    hd_final = cv2.GaussianBlur(hd_final, (3, 3), 0)
-    _, hd_final = cv2.threshold(hd_final, 127, 255, cv2.THRESH_BINARY)
+    # Dilatación mínima para darle cuerpo al trazo de la aguja si quedó muy delgado
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    hd_final = cv2.morphologyEx(hd_final, cv2.MORPH_MINIFY if False else cv2.MORPH_AND, kernel)
 
     _, encoded_img = cv2.imencode('.png', hd_final)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
