@@ -16,41 +16,30 @@ app.add_middleware(
 )
 
 @app.post("/generate-stencil/")
-async def generate_stencil(file: UploadFile = File(...), tolerance: int = Form(10)):
+async def generate_stencil(file: UploadFile = File(...), tolerance: int = Form(15)):
     contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # 1. Convertir a escala de grises
+    # 1. Convertir a escala de grises directa (ahorra memoria)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # 2. Súper-muestreo (Upscaling) para trabajar a nivel sub-píxel y evitar el pixelado
-    alto, ancho = gray.shape[:2]
-    img_alta = cv2.resize(gray, (ancho * 3, alto * 3), interpolation=cv2.INTER_CUBIC)
+    # 2. Filtro de caja ligero para unificar los bordes pixelados sin consumir RAM
+    # Esto elimina el ruido gris de las capturas de pantalla de inmediato
+    suave = cv2.blur(gray, (3, 3))
     
-    # 3. Eliminar suciedad de fondo e imperfecciones con un filtro Bilateral
-    # Esto mantiene los bordes afilados pero borra el ruido/manchas del fondo
-    filtrada = cv2.bilateralFilter(img_alta, 9, 75, 75)
+    # 3. Umbralizado de precisión manual basado en el slider
+    # Mapeamos el slider para controlar el contraste de la tinta directamente
+    # Un valor más bajo limpia el fondo; un valor más alto rescata líneas tenues
+    limite = max(50, min(240, 255 - (int(tolerance) * 3)))
     
-    # 4. Umbralizado Adaptativo Avanzado optimizado para texto/líneas finas de capturas
-    # Adaptamos el bloque de búsqueda según el slider (valores entre 2 y 25)
-    block_size = max(3, int(tolerance) * 2 + 1)
-    if block_size % 2 == 0:
-        block_size += 1
-        
-    thresh = cv2.adaptiveThreshold(
-        filtrada, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, block_size, 7
-    )
-    
-    # 5. Suavizado de curvas (Efecto Estilógrafo / Estabilizador de Procreate)
-    # Mediante un desenfoque sutil y un re-umbralizado, obligamos a los píxeles 
-    # escalonados ("dientes de sierra") a fusionarse en curvas continuas y limpias.
-    blended = cv2.GaussianBlur(thresh, (3, 3), 0)
-    _, line_art_final = cv2.threshold(blended, 180, 255, cv2.THRESH_BINARY)
+    # Creamos un line-art puro: lo que es oscuro se vuelve negro sólido, lo claro blanco puro
+    _, stencil_puro = cv2.threshold(suave, limite, 255, cv2.THRESH_BINARY)
 
-    # Volvemos a su tamaño original para optimizar la descarga sin perder el suavizado
-    resultado = cv2.resize(line_art_final, (ancho, alto), interpolation=cv2.INTER_AREA)
+    # 4. Suavizado sub-píxel ultra-ligero para eliminar el "diente de sierra"
+    # Esto le da el acabado fluido del estilógrafo sin sobrecargar el servidor
+    resultado = cv2.GaussianBlur(stencil_puro, (3, 3), 0)
+    _, resultado = cv2.threshold(resultado, 200, 255, cv2.THRESH_BINARY)
 
     _, encoded_img = cv2.imencode('.png', resultado)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
@@ -61,13 +50,13 @@ async def render_hd(file: UploadFile = File(...)):
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
 
-    # El Render HD aplica una interpolación de vectores simulada (Supersampling definitivo)
-    alto, ancho = img.shape[:2]
-    hd_scale = cv2.resize(img, (ancho * 2, alto * 2), interpolation=cv2.INTER_CUBIC)
+    # Render HD optimizado para el plan gratuito de Render (No genera caídas de memoria)
+    # Dilatamos un píxel para rellenar microporos en las curvas y luego suavizamos
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    img_consolidada = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
     
-    # Suavizado de bordes profundos
-    hd_blur = cv2.GaussianBlur(hd_scale, (5, 5), 0)
-    _, final_hd = cv2.threshold(hd_blur, 200, 255, cv2.THRESH_BINARY)
+    final_hd = cv2.GaussianBlur(img_consolidada, (3, 3), 0)
+    _, final_hd = cv2.threshold(final_hd, 220, 255, cv2.THRESH_BINARY)
 
     _, encoded_img = cv2.imencode('.png', final_hd)
     return StreamingResponse(io.BytesIO(encoded_img.tobytes()), media_type="image/png")
